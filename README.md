@@ -220,6 +220,8 @@ python train.py --dataset ICEWS18-renet --gpu 0 --epochs 500 --patience 20
 
 ## Datasets
 
+### Standard Benchmarks
+
 | Dataset | Task | Facts | Entities | Relations | Unseen Entity % (test) |
 |---|---|---|---|---|---|
 | WIKI-clean | Future prediction | — | — | 24 | high |
@@ -232,6 +234,24 @@ python train.py --dataset ICEWS18-renet --gpu 0 --epochs 500 --patience 20
 **Future prediction** (t > T_train): facts occur after the training cutoff — WIKI-clean, YAGO15k, ICEWS14, ICEWS18.  
 **Missing fact completion** (t ≤ T_train): facts existed during training but were unobserved — WIKIDATA12k, YAGO11k.  
 All transductive baselines achieve U-MRR ≡ 0 by definition on unseen entities across all six datasets.
+
+### New Inductive Benchmarks
+
+| Dataset | Facts | Entities | Relations | Unseen Entity % |
+|---|---|---|---|---|
+| SciInductTKG-Emerge | 177K | 46,684 | 4 | 76.4% |
+| SciInductTKG-Cold | 140K | 46,684 | 4 | 28.2% |
+| WikiInductTKG-Emerge | 12K | 14,029 | 3 | 86.7% |
+| WikiInductTKG-Cold | 7K | 14,029 | 3 | **95.1%** |
+| PolitInductTKG-Emerge | 1,087K | 22,225 | 260 | 9.4% |
+| PolitInductTKG-Cold | 1,012K | 22,225 | 260 | 36.6% |
+| InductTKG-Emerge | — | — | — | — |
+| InductTKG-Cold | — | — | — | — |
+
+Three split types per benchmark:
+- **Emerge** — time-based split with highest unseen entity ratio
+- **Rare** — long-tail entities with few historical interactions
+- **Cold** — entities completely absent from training
 
 
 ```
