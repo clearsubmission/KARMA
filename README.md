@@ -220,12 +220,18 @@ python train.py --dataset ICEWS18-renet --gpu 0 --epochs 500 --patience 20
 
 ## Datasets
 
-- YAGO15k
-- WIKI-clean
-- WIKIDATA12k
-- ICEWS14-renet
-- ICEWS18-renet
-- YAGO11k
+| Dataset | Task | Facts | Entities | Relations | Unseen Entity % (test) |
+|---|---|---|---|---|---|
+| WIKI-clean | Future prediction | — | — | 24 | high |
+| YAGO15k | Future prediction | — | — | 10 | moderate |
+| ICEWS14 | Future prediction | — | 14,541 | 248 | varies |
+| ICEWS18 | Future prediction | — | — | 251 | varies |
+| WIKIDATA12k | Missing fact completion | — | — | 24 | very low |
+| YAGO11k | Missing fact completion | — | — | 10 | very low |
+
+**Future prediction** (t > T_train): facts occur after the training cutoff — WIKI-clean, YAGO15k, ICEWS14, ICEWS18.  
+**Missing fact completion** (t ≤ T_train): facts existed during training but were unobserved — WIKIDATA12k, YAGO11k.  
+All transductive baselines achieve U-MRR ≡ 0 by definition on unseen entities across all six datasets.
 
 
 ```
