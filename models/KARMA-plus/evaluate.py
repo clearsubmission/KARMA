@@ -9,9 +9,8 @@ def evaluate(model, data_loader, filter_dict, num_entities,
     model.eval()
     ranks, ranks_seen, ranks_unseen = [], [], []
 
-    # All entity representations via entity_table
     all_ent_embs = model.layer_norm(
-        model.entity_table.weight).detach()               # (N, d)
+        model.entity_table.weight).detach()
 
     for batch in tqdm(data_loader, desc=f'[{split}]', leave=False):
         (s_ids, r_ids, o_ids, taus,
@@ -20,23 +19,18 @@ def evaluate(model, data_loader, filter_dict, num_entities,
 
         B = r_ids.size(0)
 
-        # Subject via hybrid encoder — returns (emb, cluster_w) tuple
         s_result = model.entity_embed(
             s_rels, s_nbrs, s_times, s_lens, taus, s_ids)
-        s_embs   = s_result[0]                            # (B, d)
-
+        s_embs   = s_result[0]
         r_embs   = model.relation_embeddings[r_ids]
-        sr       = s_embs * r_embs                        # (B, d)
+        sr       = s_embs * r_embs
+        scores_all = sr @ all_ent_embs.t()
 
-        # Score all entities via entity_table
-        scores_all = sr @ all_ent_embs.t()                # (B, N)
-
-        # Unseen objects: score via inductive encoder
+        # Unseen: use inductive encoder
         o_ind_result = model.inductive_embed(
             o_rels, o_nbrs, o_times, o_lens, taus)
-        o_ind        = o_ind_result[0]                    # (B, d) — first element
-        o_ind        = model.layer_norm(o_ind)
-        o_ind_scores = (sr * o_ind).sum(dim=-1)           # (B,)
+        o_ind        = model.layer_norm(o_ind_result[0])
+        o_ind_scores = (sr * o_ind).sum(dim=-1)
 
         for i in range(B):
             s   = s_ids[i].item()

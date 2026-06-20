@@ -10,26 +10,27 @@ from evaluate import evaluate, print_results
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--dataset',       type=str,   required=True)
-    p.add_argument('--data_dir',      type=str,   default='/storage/bhull113/rhgnn/data')
-    p.add_argument('--save_dir',      type=str,   default='/storage/bhull113/karma/checkpoints')
-    p.add_argument('--embedding_dim', type=int,   default=200)
-    p.add_argument('--num_anchors',   type=int,   default=16)
-    p.add_argument('--sigma',         type=float, default=0.5)
-    p.add_argument('--score_func',    type=str,   default='distmult')
-    p.add_argument('--dropout',       type=float, default=0.2)
-    p.add_argument('--lambda2',       type=float, default=0.001)
-    p.add_argument('--num_neg',       type=int,   default=64)
-    p.add_argument('--epochs',        type=int,   default=500)
-    p.add_argument('--batch_size',    type=int,   default=512)
-    p.add_argument('--lr',            type=float, default=1e-3)
-    p.add_argument('--weight_decay',  type=float, default=1e-5)
-    p.add_argument('--patience',      type=int,   default=20)
-    p.add_argument('--eval_every',    type=int,   default=5)
-    p.add_argument('--num_workers',   type=int,   default=0)
-    p.add_argument('--max_history',   type=int,   default=20)
-    p.add_argument('--gpu',           type=int,   default=0)
-    p.add_argument('--seed',          type=int,   default=42)
+    p.add_argument('--dataset',      type=str,   required=True)
+    p.add_argument('--data_dir',     type=str,   default='/storage/bhull113/rhgnn/data')
+    p.add_argument('--save_dir',     type=str,   default='/storage/bhull113/karma/checkpoints')
+    p.add_argument('--embedding_dim',type=int,   default=200)
+    p.add_argument('--num_anchors',  type=int,   default=16)
+    p.add_argument('--sigma',        type=float, default=0.5)
+    p.add_argument('--score_func',   type=str,   default='distmult')
+    p.add_argument('--dropout',      type=float, default=0.2)
+    p.add_argument('--lambda2',      type=float, default=0.001)
+    p.add_argument('--num_neg',      type=int,   default=64)
+    p.add_argument('--max_paths',    type=int,   default=10)
+    p.add_argument('--epochs',       type=int,   default=500)
+    p.add_argument('--batch_size',   type=int,   default=512)
+    p.add_argument('--lr',           type=float, default=1e-3)
+    p.add_argument('--weight_decay', type=float, default=1e-5)
+    p.add_argument('--patience',     type=int,   default=20)
+    p.add_argument('--eval_every',   type=int,   default=5)
+    p.add_argument('--num_workers',  type=int,   default=0)
+    p.add_argument('--max_history',  type=int,   default=20)
+    p.add_argument('--gpu',          type=int,   default=0)
+    p.add_argument('--seed',         type=int,   default=42)
     return p.parse_args()
 
 
@@ -45,16 +46,19 @@ def main():
     device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
 
     print(f"\n{'='*60}")
-    print(f"  KARMA-base (Inductive)  |  Dataset: {args.dataset}  |  Device: {device}")
+    print(f"  KARMA-R  |  Dataset: {args.dataset}  |  Device: {device}")
+    print(f"  max_paths: {args.max_paths}")
     print(f"{'='*60}")
 
     data_path = os.path.join(args.data_dir, args.dataset)
-    tkgdata   = TKGDataset(data_path)
+    tkgdata   = TKGDataset(data_path,
+                           max_history=args.max_history,
+                           max_paths=args.max_paths)
 
     train_loader, valid_loader, test_loader = get_dataloaders(
         tkgdata, batch_size=args.batch_size, num_workers=args.num_workers)
 
-    all_quads   = np.concatenate([tkgdata.train, tkgdata.valid, tkgdata.test], axis=0)
+    all_quads   = np.concatenate([tkgdata.train, tkgdata.valid, tkgdata.test])
     filter_dict = build_filter_dict_normalized(
         all_quads, tkgdata.t_min, tkgdata.t_range)
 
@@ -67,6 +71,7 @@ def main():
         dropout       = args.dropout,
         score_func    = args.score_func,
         max_history   = args.max_history,
+        max_paths     = args.max_paths,
     ).to(device)
 
     print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
@@ -76,8 +81,8 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
 
     os.makedirs(args.save_dir, exist_ok=True)
-    ckpt_path    = os.path.join(args.save_dir, f'karmabase_{args.dataset}_best.pt')
-    results_path = os.path.join(args.save_dir, f'karmabase_{args.dataset}_results.json')
+    ckpt_path    = os.path.join(args.save_dir, f'karmar_{args.dataset}_best.pt')
+    results_path = os.path.join(args.save_dir, f'karmar_{args.dataset}_results.json')
 
     best_mrr, patience_counter = 0.0, 0
     N = tkgdata.num_entities
@@ -89,36 +94,41 @@ def main():
         for batch in train_loader:
             (s_ids, r_ids, o_ids, taus,
              s_rels, s_nbrs, s_times, s_lens,
-             o_rels, o_nbrs, o_times, o_lens) = [x.to(device) for x in batch]
+             o_rels, o_nbrs, o_times, o_lens,
+             s_pr1, s_pr2, s_pn2,
+             s_pt1, s_pt2, s_pmask) = [x.to(device) for x in batch]
 
             optimizer.zero_grad()
             B = r_ids.size(0)
 
-            # Pure inductive embeddings — no entity_table
-            s_embs = model.entity_embed(s_rels, s_nbrs, s_times, s_lens, taus)
-            o_embs = model.entity_embed(o_rels, o_nbrs, o_times, o_lens, taus)
-            r_embs = model.relation_embeddings[r_ids]
+            # Subject embedding with 2-hop paths
+            s_embs = model.entity_embed(
+                s_rels, s_nbrs, s_times, s_lens, taus, s_ids,
+                s_pr1, s_pr2, s_pn2, s_pt1, s_pt2, s_pmask)
 
+            # Object embedding (1-hop only for efficiency)
+            o_embs = model.entity_embed(
+                o_rels, o_nbrs, o_times, o_lens, taus, o_ids)
+
+            r_embs = model.relation_embeddings[r_ids]
             pos_scores = (s_embs * r_embs * o_embs).sum(dim=-1)
 
-            # Negative: random neighbor embeddings
+            # Negatives via entity_table
             neg_ids    = torch.randint(0, N, (B, args.num_neg), device=device)
-            neg_embs   = model.layer_norm(model.neighbor_embeddings[neg_ids])
+            neg_embs   = model.layer_norm(model.entity_table(neg_ids))
             sr_exp     = (s_embs * r_embs).unsqueeze(1)
             neg_scores = (sr_exp * neg_embs).sum(dim=-1)
 
-            # Positive via neighbor_embeddings
-            pos_nb    = model.layer_norm(model.neighbor_embeddings[o_ids])
+            pos_nb    = model.layer_norm(model.entity_table(o_ids))
             pos_nb_sc = (s_embs * r_embs * pos_nb).sum(dim=-1)
 
-            # BCE loss
             loss_pos = torch.nn.functional.binary_cross_entropy_with_logits(
                 pos_nb_sc, torch.ones(B, device=device))
             loss_neg = torch.nn.functional.binary_cross_entropy_with_logits(
                 neg_scores, torch.zeros(B, args.num_neg, device=device))
             loss = loss_pos + loss_neg
 
-            # Anchor spread regularization
+            # Anchor spread
             if model.K > 1:
                 spread = torch.pdist(
                     model.anchor_times.unsqueeze(1), p=2).mean()
@@ -160,12 +170,12 @@ def main():
         tkgdata.num_entities, device, 'test',
         unseen_entities=tkgdata.unseen_entities,
     )
-    print_results(test_results, split=f'Test [{args.dataset}] KARMA-base')
+    print_results(test_results, split=f'Test [{args.dataset}] KARMA-R')
 
     with open(results_path, 'w') as f:
         json.dump({
             'dataset':      args.dataset,
-            'model':        'KARMA-base',
+            'model':        'KARMA-R',
             'best_epoch':   ckpt['epoch'],
             'valid':        ckpt['valid_results'],
             'test':         test_results,

@@ -9,7 +9,7 @@ def evaluate(model, data_loader, filter_dict, num_entities,
     model.eval()
     ranks, ranks_seen, ranks_unseen = [], [], []
 
-    # All entity representations via entity_table
+    # All entity representations via entity_table (transductive side)
     all_ent_embs = model.layer_norm(
         model.entity_table.weight).detach()               # (N, d)
 
@@ -20,22 +20,19 @@ def evaluate(model, data_loader, filter_dict, num_entities,
 
         B = r_ids.size(0)
 
-        # Subject via hybrid encoder — returns (emb, cluster_w) tuple
-        s_result = model.entity_embed(
+        # Subject via hybrid encoder (uses both history + entity_table)
+        s_embs = model.entity_embed(
             s_rels, s_nbrs, s_times, s_lens, taus, s_ids)
-        s_embs   = s_result[0]                            # (B, d)
-
-        r_embs   = model.relation_embeddings[r_ids]
-        sr       = s_embs * r_embs                        # (B, d)
+        r_embs = model.relation_embeddings[r_ids]
+        sr     = s_embs * r_embs                          # (B, d)
 
         # Score all entities via entity_table
         scores_all = sr @ all_ent_embs.t()                # (B, N)
 
-        # Unseen objects: score via inductive encoder
-        o_ind_result = model.inductive_embed(
+        # For unseen objects: override with inductive encoder score
+        o_ind = model.inductive_embed(
             o_rels, o_nbrs, o_times, o_lens, taus)
-        o_ind        = o_ind_result[0]                    # (B, d) — first element
-        o_ind        = model.layer_norm(o_ind)
+        o_ind = model.layer_norm(o_ind)
         o_ind_scores = (sr * o_ind).sum(dim=-1)           # (B,)
 
         for i in range(B):
@@ -46,9 +43,12 @@ def evaluate(model, data_loader, filter_dict, num_entities,
             is_unseen = (unseen_entities is not None and o in unseen_entities)
 
             scores = scores_all[i].clone()
+
+            # Unseen entities: use inductive encoder score for true object
             if is_unseen:
                 scores[o] = o_ind_scores[i].item()
 
+            # Filter
             true_objs = filter_dict.get((s, r, tau), set())
             mask_ids  = list(true_objs - {o})
             if mask_ids:

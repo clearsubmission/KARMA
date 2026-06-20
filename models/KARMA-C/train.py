@@ -10,26 +10,31 @@ from evaluate import evaluate, print_results
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--dataset',       type=str,   required=True)
-    p.add_argument('--data_dir',      type=str,   default='/storage/bhull113/rhgnn/data')
-    p.add_argument('--save_dir',      type=str,   default='/storage/bhull113/karma/checkpoints')
-    p.add_argument('--embedding_dim', type=int,   default=200)
-    p.add_argument('--num_anchors',   type=int,   default=16)
-    p.add_argument('--sigma',         type=float, default=0.5)
-    p.add_argument('--score_func',    type=str,   default='distmult')
-    p.add_argument('--dropout',       type=float, default=0.2)
-    p.add_argument('--lambda2',       type=float, default=0.001)
-    p.add_argument('--num_neg',       type=int,   default=64)
-    p.add_argument('--epochs',        type=int,   default=500)
-    p.add_argument('--batch_size',    type=int,   default=512)
-    p.add_argument('--lr',            type=float, default=1e-3)
-    p.add_argument('--weight_decay',  type=float, default=1e-5)
-    p.add_argument('--patience',      type=int,   default=20)
-    p.add_argument('--eval_every',    type=int,   default=5)
-    p.add_argument('--num_workers',   type=int,   default=0)
-    p.add_argument('--max_history',   type=int,   default=20)
-    p.add_argument('--gpu',           type=int,   default=0)
-    p.add_argument('--seed',          type=int,   default=42)
+    p.add_argument('--dataset',        type=str,   required=True)
+    p.add_argument('--data_dir',       type=str,   default='/storage/bhull113/rhgnn/data')
+    p.add_argument('--save_dir',       type=str,   default='/storage/bhull113/karma/checkpoints')
+    p.add_argument('--embedding_dim',  type=int,   default=200)
+    p.add_argument('--num_anchors',    type=int,   default=16)
+    p.add_argument('--sigma',          type=float, default=0.5)
+    p.add_argument('--score_func',     type=str,   default='distmult')
+    p.add_argument('--dropout',        type=float, default=0.2)
+    p.add_argument('--lambda2',        type=float, default=0.001)
+    p.add_argument('--lambda_cont',    type=float, default=0.1)
+    p.add_argument('--lambda_smooth',  type=float, default=0.05)
+    p.add_argument('--temperature',    type=float, default=0.07)
+    p.add_argument('--projection_dim', type=int,   default=128)
+    p.add_argument('--num_neg',        type=int,   default=64)
+    p.add_argument('--num_cont_neg',   type=int,   default=16)
+    p.add_argument('--epochs',         type=int,   default=500)
+    p.add_argument('--batch_size',     type=int,   default=512)
+    p.add_argument('--lr',             type=float, default=1e-3)
+    p.add_argument('--weight_decay',   type=float, default=1e-5)
+    p.add_argument('--patience',       type=int,   default=20)
+    p.add_argument('--eval_every',     type=int,   default=5)
+    p.add_argument('--num_workers',    type=int,   default=0)
+    p.add_argument('--max_history',    type=int,   default=20)
+    p.add_argument('--gpu',            type=int,   default=0)
+    p.add_argument('--seed',           type=int,   default=42)
     return p.parse_args()
 
 
@@ -45,7 +50,9 @@ def main():
     device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
 
     print(f"\n{'='*60}")
-    print(f"  KARMA-base (Inductive)  |  Dataset: {args.dataset}  |  Device: {device}")
+    print(f"  KARMA-C  |  Dataset: {args.dataset}  |  Device: {device}")
+    print(f"  temp:{args.temperature}  lambda_cont:{args.lambda_cont}  "
+          f"lambda_smooth:{args.lambda_smooth}")
     print(f"{'='*60}")
 
     data_path = os.path.join(args.data_dir, args.dataset)
@@ -59,14 +66,16 @@ def main():
         all_quads, tkgdata.t_min, tkgdata.t_range)
 
     model = KARMA(
-        num_entities  = tkgdata.num_entities,
-        num_relations = tkgdata.num_relations,
-        embedding_dim = args.embedding_dim,
-        num_anchors   = args.num_anchors,
-        sigma         = args.sigma,
-        dropout       = args.dropout,
-        score_func    = args.score_func,
-        max_history   = args.max_history,
+        num_entities   = tkgdata.num_entities,
+        num_relations  = tkgdata.num_relations,
+        embedding_dim  = args.embedding_dim,
+        num_anchors    = args.num_anchors,
+        sigma          = args.sigma,
+        dropout        = args.dropout,
+        score_func     = args.score_func,
+        max_history    = args.max_history,
+        temperature    = args.temperature,
+        projection_dim = args.projection_dim,
     ).to(device)
 
     print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
@@ -76,8 +85,8 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
 
     os.makedirs(args.save_dir, exist_ok=True)
-    ckpt_path    = os.path.join(args.save_dir, f'karmabase_{args.dataset}_best.pt')
-    results_path = os.path.join(args.save_dir, f'karmabase_{args.dataset}_results.json')
+    ckpt_path    = os.path.join(args.save_dir, f'karmac_{args.dataset}_best.pt')
+    results_path = os.path.join(args.save_dir, f'karmac_{args.dataset}_results.json')
 
     best_mrr, patience_counter = 0.0, 0
     N = tkgdata.num_entities
@@ -94,29 +103,60 @@ def main():
             optimizer.zero_grad()
             B = r_ids.size(0)
 
-            # Pure inductive embeddings — no entity_table
-            s_embs = model.entity_embed(s_rels, s_nbrs, s_times, s_lens, taus)
-            o_embs = model.entity_embed(o_rels, o_nbrs, o_times, o_lens, taus)
+            # === Link prediction loss (same as KARMA-T) ===
+            s_embs = model.entity_embed(
+                s_rels, s_nbrs, s_times, s_lens, taus, s_ids)
+            o_embs = model.entity_embed(
+                o_rels, o_nbrs, o_times, o_lens, taus, o_ids)
             r_embs = model.relation_embeddings[r_ids]
 
             pos_scores = (s_embs * r_embs * o_embs).sum(dim=-1)
 
-            # Negative: random neighbor embeddings
             neg_ids    = torch.randint(0, N, (B, args.num_neg), device=device)
-            neg_embs   = model.layer_norm(model.neighbor_embeddings[neg_ids])
+            neg_embs   = model.layer_norm(model.entity_table(neg_ids))
             sr_exp     = (s_embs * r_embs).unsqueeze(1)
             neg_scores = (sr_exp * neg_embs).sum(dim=-1)
 
-            # Positive via neighbor_embeddings
-            pos_nb    = model.layer_norm(model.neighbor_embeddings[o_ids])
+            pos_nb    = model.layer_norm(model.entity_table(o_ids))
             pos_nb_sc = (s_embs * r_embs * pos_nb).sum(dim=-1)
 
-            # BCE loss
             loss_pos = torch.nn.functional.binary_cross_entropy_with_logits(
                 pos_nb_sc, torch.ones(B, device=device))
             loss_neg = torch.nn.functional.binary_cross_entropy_with_logits(
                 neg_scores, torch.zeros(B, args.num_neg, device=device))
             loss = loss_pos + loss_neg
+
+            # === KARMA-C: Contrastive temporal loss ===
+            # Positive pairs: same entities, slightly different timestamps
+            # Create positive by adding small time perturbation
+            tau_delta   = torch.rand(B, device=device) * 0.1  # small time shift
+            tau_pos     = (taus + tau_delta).clamp(0, 1)
+
+            # Encode same entities at perturbed timestamp
+            s_embs_pos = model.entity_embed(
+                s_rels, s_nbrs, s_times, s_lens, tau_pos, s_ids)
+
+            # Negative pairs: different entities (use shuffled batch)
+            cont_neg_ids = torch.randint(
+                0, N, (B, args.num_cont_neg), device=device)  # (B, Kc)
+
+            # Get negative embeddings via entity_table
+            cont_neg_embs = model.layer_norm(
+                model.entity_table(cont_neg_ids))              # (B, Kc, d)
+
+            # Contrastive loss on subject embeddings
+            loss_cont = model.contrastive_loss(
+                s_embs, s_embs_pos, cont_neg_embs)
+
+            # === KARMA-C: Temporal smoothness loss ===
+            # Entity embedding should change smoothly over time
+            loss_smooth = model.temporal_smoothness_loss(
+                s_embs, s_embs_pos, tau_delta)
+
+            # === Total loss ===
+            loss = (loss
+                    + args.lambda_cont   * loss_cont
+                    + args.lambda_smooth * loss_smooth)
 
             # Anchor spread regularization
             if model.K > 1:
@@ -160,12 +200,12 @@ def main():
         tkgdata.num_entities, device, 'test',
         unseen_entities=tkgdata.unseen_entities,
     )
-    print_results(test_results, split=f'Test [{args.dataset}] KARMA-base')
+    print_results(test_results, split=f'Test [{args.dataset}] KARMA-C')
 
     with open(results_path, 'w') as f:
         json.dump({
             'dataset':      args.dataset,
-            'model':        'KARMA-base',
+            'model':        'KARMA-C',
             'best_epoch':   ckpt['epoch'],
             'valid':        ckpt['valid_results'],
             'test':         test_results,

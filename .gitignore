@@ -1,0 +1,15 @@
+checkpoints/
+*.pt
+*.pkl
+*.pth
+dataset/
+data/
+*.npy
+*.npz
+logs/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+results/

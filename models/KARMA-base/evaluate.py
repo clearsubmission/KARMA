@@ -9,9 +9,9 @@ def evaluate(model, data_loader, filter_dict, num_entities,
     model.eval()
     ranks, ranks_seen, ranks_unseen = [], [], []
 
-    # All entity representations via entity_table (transductive side)
+    # KARMA-base uses neighbor_embeddings (no entity_table)
     all_ent_embs = model.layer_norm(
-        model.entity_table.weight).detach()               # (N, d)
+        model.neighbor_embeddings).detach()               # (N, d)
 
     for batch in tqdm(data_loader, desc=f'[{split}]', leave=False):
         (s_ids, r_ids, o_ids, taus,
@@ -20,19 +20,17 @@ def evaluate(model, data_loader, filter_dict, num_entities,
 
         B = r_ids.size(0)
 
-        # Subject via hybrid encoder (uses both history + entity_table)
         s_embs = model.entity_embed(
-            s_rels, s_nbrs, s_times, s_lens, taus, s_ids)
+            s_rels, s_nbrs, s_times, s_lens, taus)        # no entity_ids
         r_embs = model.relation_embeddings[r_ids]
         sr     = s_embs * r_embs                          # (B, d)
 
-        # Score all entities via entity_table
         scores_all = sr @ all_ent_embs.t()                # (B, N)
 
-        # For unseen objects: override with inductive encoder score
-        o_ind = model.inductive_embed(
+        # Unseen: use inductive encoder for true object
+        o_ind        = model.inductive_embed(
             o_rels, o_nbrs, o_times, o_lens, taus)
-        o_ind = model.layer_norm(o_ind)
+        o_ind        = model.layer_norm(o_ind)
         o_ind_scores = (sr * o_ind).sum(dim=-1)           # (B,)
 
         for i in range(B):
@@ -43,12 +41,9 @@ def evaluate(model, data_loader, filter_dict, num_entities,
             is_unseen = (unseen_entities is not None and o in unseen_entities)
 
             scores = scores_all[i].clone()
-
-            # Unseen entities: use inductive encoder score for true object
             if is_unseen:
                 scores[o] = o_ind_scores[i].item()
 
-            # Filter
             true_objs = filter_dict.get((s, r, tau), set())
             mask_ids  = list(true_objs - {o})
             if mask_ids:

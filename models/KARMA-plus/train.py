@@ -10,28 +10,32 @@ from evaluate import evaluate, print_results
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--dataset',       type=str,   required=True)
-    p.add_argument('--data_dir',      type=str,   default='/storage/bhull113/rhgnn/data')
-    p.add_argument('--save_dir',      type=str,   default='/storage/bhull113/karma/checkpoints')
-    p.add_argument('--embedding_dim', type=int,   default=200)
-    p.add_argument('--num_anchors',   type=int,   default=16)
-    p.add_argument('--num_clusters',  type=int,   default=4)
-    p.add_argument('--sigma',         type=float, default=0.5)
-    p.add_argument('--score_func',    type=str,   default='distmult')
-    p.add_argument('--dropout',       type=float, default=0.2)
-    p.add_argument('--lambda2',       type=float, default=0.001)
-    p.add_argument('--lambda3',       type=float, default=0.01)
-    p.add_argument('--num_neg',       type=int,   default=64)
-    p.add_argument('--epochs',        type=int,   default=500)
-    p.add_argument('--batch_size',    type=int,   default=512)
-    p.add_argument('--lr',            type=float, default=1e-3)
-    p.add_argument('--weight_decay',  type=float, default=1e-5)
-    p.add_argument('--patience',      type=int,   default=20)
-    p.add_argument('--eval_every',    type=int,   default=5)
-    p.add_argument('--num_workers',   type=int,   default=0)
-    p.add_argument('--max_history',   type=int,   default=20)
-    p.add_argument('--gpu',           type=int,   default=0)
-    p.add_argument('--seed',          type=int,   default=42)
+    p.add_argument('--dataset',        type=str,   required=True)
+    p.add_argument('--data_dir',       type=str,   default='/storage/bhull113/rhgnn/data')
+    p.add_argument('--save_dir',       type=str,   default='/storage/bhull113/karma/checkpoints')
+    p.add_argument('--embedding_dim',  type=int,   default=200)
+    p.add_argument('--num_anchors',    type=int,   default=16)
+    p.add_argument('--num_clusters',   type=int,   default=4)
+    p.add_argument('--sigma',          type=float, default=0.5)
+    p.add_argument('--score_func',     type=str,   default='distmult')
+    p.add_argument('--dropout',        type=float, default=0.2)
+    p.add_argument('--lambda2',        type=float, default=0.001)
+    p.add_argument('--lambda_cluster', type=float, default=0.01)
+    p.add_argument('--lambda_cont',    type=float, default=0.05)
+    p.add_argument('--lambda_future',  type=float, default=0.05)
+    p.add_argument('--temperature',    type=float, default=0.07)
+    p.add_argument('--num_neg',        type=int,   default=64)
+    p.add_argument('--num_cont_neg',   type=int,   default=16)
+    p.add_argument('--epochs',         type=int,   default=500)
+    p.add_argument('--batch_size',     type=int,   default=512)
+    p.add_argument('--lr',             type=float, default=1e-3)
+    p.add_argument('--weight_decay',   type=float, default=1e-5)
+    p.add_argument('--patience',       type=int,   default=20)
+    p.add_argument('--eval_every',     type=int,   default=5)
+    p.add_argument('--num_workers',    type=int,   default=0)
+    p.add_argument('--max_history',    type=int,   default=20)
+    p.add_argument('--gpu',            type=int,   default=0)
+    p.add_argument('--seed',           type=int,   default=42)
     return p.parse_args()
 
 
@@ -41,40 +45,14 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def cluster_diversity_loss(cluster_w):
-    """Maximize entropy of cluster assignments — prevent collapse to one cluster."""
-    mean_usage = cluster_w.mean(dim=0)                          # (C,)
-    entropy    = -(mean_usage * (mean_usage + 1e-8).log()).sum()
-    return -entropy
-
-
-def anchor_spread_loss(model):
-    """Keep anchors spread across time within and between clusters."""
-    loss = torch.tensor(0.0,
-        device=model.adaptive_anchor.anchor_clusters.device)
-
-    for c in range(model.C):
-        anchors = model.adaptive_anchor.anchor_clusters[c]
-        if len(anchors) > 1:
-            spread = torch.pdist(anchors.unsqueeze(1), p=2).mean()
-            loss   = loss + torch.clamp(1.0 - spread, min=0)
-
-    cluster_means = model.adaptive_anchor.anchor_clusters.mean(dim=1)
-    if len(cluster_means) > 1:
-        diversity = torch.pdist(cluster_means.unsqueeze(1), p=2).mean()
-        loss      = loss + torch.clamp(1.0 - diversity, min=0)
-
-    return loss
-
-
 def main():
     args = parse_args()
     set_seed(args.seed)
     device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
 
     print(f"\n{'='*60}")
-    print(f"  KARMA-A  |  Dataset: {args.dataset}  |  Device: {device}")
-    print(f"  Anchors: {args.num_anchors}  Clusters: {args.num_clusters}")
+    print(f"  KARMA+  |  Dataset: {args.dataset}  |  Device: {device}")
+    print(f"  Anchors:{args.num_anchors} Clusters:{args.num_clusters}")
     print(f"{'='*60}")
 
     data_path = os.path.join(args.data_dir, args.dataset)
@@ -83,20 +61,21 @@ def main():
     train_loader, valid_loader, test_loader = get_dataloaders(
         tkgdata, batch_size=args.batch_size, num_workers=args.num_workers)
 
-    all_quads   = np.concatenate([tkgdata.train, tkgdata.valid, tkgdata.test], axis=0)
+    all_quads   = np.concatenate([tkgdata.train, tkgdata.valid, tkgdata.test])
     filter_dict = build_filter_dict_normalized(
         all_quads, tkgdata.t_min, tkgdata.t_range)
 
     model = KARMA(
-        num_entities  = tkgdata.num_entities,
-        num_relations = tkgdata.num_relations,
-        embedding_dim = args.embedding_dim,
-        num_anchors   = args.num_anchors,
-        num_clusters  = args.num_clusters,
-        sigma         = args.sigma,
-        dropout       = args.dropout,
-        score_func    = args.score_func,
-        max_history   = args.max_history,
+        num_entities   = tkgdata.num_entities,
+        num_relations  = tkgdata.num_relations,
+        embedding_dim  = args.embedding_dim,
+        num_anchors    = args.num_anchors,
+        num_clusters   = args.num_clusters,
+        sigma          = args.sigma,
+        dropout        = args.dropout,
+        score_func     = args.score_func,
+        max_history    = args.max_history,
+        temperature    = args.temperature,
     ).to(device)
 
     print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
@@ -106,8 +85,8 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
 
     os.makedirs(args.save_dir, exist_ok=True)
-    ckpt_path    = os.path.join(args.save_dir, f'karmaa_{args.dataset}_best.pt')
-    results_path = os.path.join(args.save_dir, f'karmaa_{args.dataset}_results.json')
+    ckpt_path    = os.path.join(args.save_dir, f'karmaplus_{args.dataset}_best.pt')
+    results_path = os.path.join(args.save_dir, f'karmaplus_{args.dataset}_results.json')
 
     best_mrr, patience_counter = 0.0, 0
     N = tkgdata.num_entities
@@ -124,43 +103,50 @@ def main():
             optimizer.zero_grad()
             B = r_ids.size(0)
 
-            # KARMA-A hybrid embeddings with cluster weights
+            # === Main embeddings ===
             s_result = model.entity_embed(
                 s_rels, s_nbrs, s_times, s_lens, taus, s_ids)
             o_result = model.entity_embed(
                 o_rels, o_nbrs, o_times, o_lens, taus, o_ids)
-
-            s_embs, s_cw = s_result
-            o_embs, o_cw = o_result
+            s_embs, s_cw, s_rp = s_result
+            o_embs, o_cw, o_rp = o_result
             r_embs = model.relation_embeddings[r_ids]
 
-            # Positive scores
+            # === Link prediction loss ===
             pos_scores = (s_embs * r_embs * o_embs).sum(dim=-1)
-
-            # Negative via entity_table
             neg_ids    = torch.randint(0, N, (B, args.num_neg), device=device)
             neg_embs   = model.layer_norm(model.entity_table(neg_ids))
             sr_exp     = (s_embs * r_embs).unsqueeze(1)
             neg_scores = (sr_exp * neg_embs).sum(dim=-1)
+            pos_nb     = model.layer_norm(model.entity_table(o_ids))
+            pos_nb_sc  = (s_embs * r_embs * pos_nb).sum(dim=-1)
 
-            pos_nb    = model.layer_norm(model.entity_table(o_ids))
-            pos_nb_sc = (s_embs * r_embs * pos_nb).sum(dim=-1)
+            loss = (torch.nn.functional.binary_cross_entropy_with_logits(
+                        pos_nb_sc, torch.ones(B, device=device)) +
+                    torch.nn.functional.binary_cross_entropy_with_logits(
+                        neg_scores, torch.zeros(B, args.num_neg, device=device)))
 
-            # BCE loss
-            loss_pos = torch.nn.functional.binary_cross_entropy_with_logits(
-                pos_nb_sc, torch.ones(B, device=device))
-            loss_neg = torch.nn.functional.binary_cross_entropy_with_logits(
-                neg_scores, torch.zeros(B, args.num_neg, device=device))
-            loss = loss_pos + loss_neg
+            # === KARMA-A: cluster diversity loss ===
+            loss += args.lambda_cluster * (
+                model.cluster_diversity_loss(s_cw) +
+                model.cluster_diversity_loss(o_cw))
 
-            # KARMA-A: cluster diversity loss
-            div_loss = cluster_diversity_loss(s_cw) + \
-                       cluster_diversity_loss(o_cw)
-            loss = loss + args.lambda3 * div_loss
+            # === KARMA-C: contrastive loss ===
+            tau_pos      = (taus + torch.rand(B, device=device) * 0.1).clamp(0, 1)
+            s_pos_result = model.entity_embed(
+                s_rels, s_nbrs, s_times, s_lens, tau_pos, s_ids)
+            s_pos_embs   = s_pos_result[0]
+            cont_neg_ids = torch.randint(0, N, (B, args.num_cont_neg), device=device)
+            cont_neg_embs = model.layer_norm(model.entity_table(cont_neg_ids))
+            loss += args.lambda_cont * model.contrastive_loss(
+                s_embs, s_pos_embs, cont_neg_embs)
 
-            # Anchor spread loss
-            spread_loss = anchor_spread_loss(model)
-            loss = loss + args.lambda2 * spread_loss
+            # === KARMA-F: future relation loss ===
+            loss += args.lambda_future * model.future_relation_loss(
+                s_ids, r_ids)
+
+            # === Anchor spread ===
+            loss += args.lambda2 * model.anchor_spread_loss()
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -196,14 +182,13 @@ def main():
     test_results = evaluate(
         model, test_loader, filter_dict,
         tkgdata.num_entities, device, 'test',
-        unseen_entities=tkgdata.unseen_entities,
-    )
-    print_results(test_results, split=f'Test [{args.dataset}] KARMA-A')
+        unseen_entities=tkgdata.unseen_entities)
+    print_results(test_results, split=f'Test [{args.dataset}] KARMA+')
 
     with open(results_path, 'w') as f:
         json.dump({
             'dataset':      args.dataset,
-            'model':        'KARMA-A',
+            'model':        'KARMA+',
             'best_epoch':   ckpt['epoch'],
             'valid':        ckpt['valid_results'],
             'test':         test_results,
